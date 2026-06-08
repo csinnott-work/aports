@@ -1,0 +1,82 @@
+# Maintainer: Cris Sinnott <csinnott@qnx.com>
+pkgname=stable-diffusion.cpp
+pkgver=0_git20260602
+pkgrel=0
+_sdcommit=a51021b190b3aac1684c22a03fb0607f144ab6ce
+_ggmlcommit=24bcb105ffe63facf65bc4a2d084f849a4e23965
+pkgdesc="Stable Diffusion in pure C/C++ with Vulkan and CPU backends"
+url="https://github.com/leejet/stable-diffusion.cpp"
+arch="x86_64"
+license="MIT"
+makedepends="cmake ninja clang libc++-dev vulkan-headers qnx-vulkan"
+subpackages="$pkgname-dev $pkgname-dbg"
+source="
+	stable-diffusion.cpp-$_sdcommit.tar.gz::https://github.com/qnx-ports/stable-diffusion.cpp/archive/$_sdcommit.tar.gz
+	ggml-$_ggmlcommit.tar.gz::https://github.com/qnx-ports/ggml/archive/$_ggmlcommit.tar.gz
+	"
+builddir="$srcdir/stable-diffusion.cpp-$_sdcommit"
+
+prepare() {
+	rm -rf "$builddir/ggml"
+	mv "$srcdir/ggml-$_ggmlcommit" "$builddir/ggml"
+
+	# ggml's vulkan-shaders-gen ExternalProject invokes cmake without specifying
+	# a compiler, falling back to 'cc'/'c++' from PATH. QNX does not provide
+	# these aliases, so create them in a local bin directory prepended to PATH.
+	mkdir -p "$builddir/local-bin"
+	ln -sf /usr/bin/clang   "$builddir/local-bin/cc"
+	ln -sf /usr/bin/clang++ "$builddir/local-bin/c++"
+}
+
+build() {
+	# abuild reuses the extracted source directory across rebuilds; remove stale
+	# cmake build trees so vulkan-shaders-gen is always rebuilt from current source.
+	rm -rf build build-test
+
+	# abuild injects --as-needed; the ggml-vulkan static archive is handled by
+	# WHOLE_ARCHIVE in CMakeLists.txt but strip --as-needed anyway to be safe.
+	export LDFLAGS="${LDFLAGS/--as-needed/--no-as-needed}"
+
+	PATH="$builddir/local-bin:$PATH" \
+	cmake -B build -G Ninja \
+		-DCMAKE_C_COMPILER=clang \
+		-DCMAKE_CXX_COMPILER=clang++ \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DSD_VULKAN=ON \
+		-DSD_BUILD_SHARED_LIBS=ON
+	# vulkan-shaders-gen writes to a shared ggml-vulkan-shaders.hpp from many
+	# parallel ninja jobs; concurrent appends corrupt the file, causing some
+	# shader variants to be silently omitted and later failing the link step.
+	# Build the shader generation targets serially first, then build in parallel.
+	PATH="$builddir/local-bin:$PATH" \
+	cmake --build build --target ggml-vulkan -j1
+	PATH="$builddir/local-bin:$PATH" \
+	cmake --build build
+
+	# CPU-only build for check(): avoids Vulkan shader linker complexity in tests
+	cmake -B build-test -G Ninja \
+		-DCMAKE_C_COMPILER=clang \
+		-DCMAKE_CXX_COMPILER=clang++ \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DSD_VULKAN=OFF \
+		-DGGML_BUILD_TESTS=ON
+	cmake --build build-test
+}
+
+check() {
+	ctest --test-dir build-test/ggml/tests \
+		--output-junit "$builddir/test-results.xml" \
+		--output-on-failure \
+		-j$(nproc)
+}
+
+package() {
+	DESTDIR="$pkgdir" cmake --build build --target install
+}
+
+sha512sums="
+7b4e19a95c4038eb08158395849ce93dfabefdbc7e7a398e4080484f34a7a0d69ad069bc2b6960d5d9a03f9de23286a682eca81128d052dbe3ac0e7a7b2bd098  stable-diffusion.cpp-a51021b190b3aac1684c22a03fb0607f144ab6ce.tar.gz
+00fdb818364dfdd9e301a384e1b76dca2b01331ded3f87f1cc693deb4c37e0a30132623946c3a301601f98c3695720b300ce75f6e537da0848dede5005e3555d  ggml-24bcb105ffe63facf65bc4a2d084f849a4e23965.tar.gz
+"
