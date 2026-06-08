@@ -1,0 +1,68 @@
+# Maintainer: Cris Sinnott <csinnott@qnx.com>
+pkgname=ncnn
+pkgver=20260526
+pkgrel=0
+pkgdesc="High-performance neural network inference framework for mobile and embedded platforms"
+url="https://github.com/Tencent/ncnn"
+arch="x86_64"
+license="BSD-3-Clause"
+makedepends="cmake ninja clang libc++-dev vulkan-headers qnx-vulkan"
+subpackages="$pkgname-dev $pkgname-dbg"
+# The plain tag tarball does not include submodules (glslang etc.); use the
+# full-source release asset which bundles all submodules.
+source="ncnn-$pkgver-full-source.zip::https://github.com/Tencent/ncnn/releases/download/$pkgver/ncnn-$pkgver-full-source.zip"
+# The full-source zip has no top-level directory wrapper.
+builddir="$srcdir"
+
+unpack() {
+	# BusyBox unzip on QNX requires -d DIR before the filename; abuild's
+	# default_unpack puts it after, which silently extracts nothing.
+	mkdir -p "$srcdir"
+	unzip -n -q -d "$srcdir" "$SRCDEST/ncnn-$pkgver-full-source.zip"
+}
+
+build() {
+	cmake -B build -G Ninja \
+		-DCMAKE_C_COMPILER=clang \
+		-DCMAKE_CXX_COMPILER=clang++ \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DNCNN_VERSION=$pkgver \
+		-DNCNN_SHARED_LIB=ON \
+		-DNCNN_VULKAN=ON \
+		-DNCNN_BUILD_TESTS=OFF \
+		-DNCNN_BUILD_BENCHMARK=OFF \
+		-DNCNN_BUILD_EXAMPLES=OFF \
+		-DNCNN_BUILD_TOOLS=OFF \
+		-DNCNN_SYSTEM_GLSLANG=OFF
+	cmake --build build
+
+	# Separate CPU-only test build: avoids Vulkan shader complexity and
+	# keeps test binaries small.
+	cmake -B build-test -G Ninja \
+		-DCMAKE_C_COMPILER=clang \
+		-DCMAKE_CXX_COMPILER=clang++ \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DNCNN_VERSION=$pkgver \
+		-DNCNN_VULKAN=OFF \
+		-DNCNN_BUILD_TESTS=ON \
+		-DNCNN_BUILD_BENCHMARK=OFF \
+		-DNCNN_BUILD_EXAMPLES=OFF \
+		-DNCNN_BUILD_TOOLS=OFF
+	cmake --build build-test
+}
+
+check() {
+	ctest --test-dir build-test \
+		--output-junit "$builddir/test-results.xml" \
+		--output-on-failure \
+		-j$(nproc)
+}
+
+package() {
+	DESTDIR="$pkgdir" cmake --build build --target install
+}
+
+sha512sums="
+5978ec7187144d1459841e9ffffb49cdbf6523a4a9e6d0ee8165dae34396538f5e1b6f85b8c2dea121711b17d94a105683d7dee85bfb483a483a726f55f0acf7  ncnn-20260526-full-source.zip
+"
