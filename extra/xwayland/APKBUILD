@@ -1,0 +1,58 @@
+# Maintainer: Cris Sinnott <cris.sinnott@qnx.com>
+pkgname=xwayland
+pkgver=24.1.9
+pkgrel=0
+pkgdesc="Run X clients under Wayland"
+url="https://xorg.freedesktop.org"
+arch="all"
+license="MIT AND X11"
+depends="xkbcomp xkeyboard-config"
+makedepends="
+	font-util-dev
+	libx11-dev
+	libxau-dev
+	libxcb-dev
+	libxcvt-dev
+	libxfont2-dev
+	libxkbfile-dev
+	libxshmfence-dev
+	meson
+	openssl-dev
+	pixman-dev
+	qnx-libdrm-dev
+	wayland-dev
+	wayland-protocols
+	xorgproto
+	xtrans
+	"
+subpackages="$pkgname-doc"
+options="!check"
+source="https://xorg.freedesktop.org/archive/individual/xserver/xwayland-${pkgver}.tar.xz
+	0001-qnx-compat.patch
+	"
+sha512sums="
+7438a572651dc77c1fd749879abccdc9a245c7b75143668d5561a8e99d41063f042a8eb3f9b931a2a12be1fc3cb9d197eee6794d0702a19e56c20f55acb35a26  xwayland-24.1.9.tar.xz
+87b38f03767611cf50d9249ce924757ea12a952589bec8af74c54353923d09bb0c0f2a74db0b566e841b5b47d16a8a8495b93fae8c56473edd8a1dc128b4250e  0001-qnx-compat.patch
+"
+
+build() {
+	abuild-meson . output \
+		-Dc_args="-DSA_RESTART=0 -I/usr/include/libdrm" \
+		-Dc_link_args="-lsocket -leventfd -lsysv-ipc" \
+		-Dglamor=false \
+		-Dglx=false \
+		-Dxdmcp=false \
+		-Dxcsecurity=false \
+		-Dxvfb=false \
+		-Dinput_thread=false \
+		-Dlibunwind=false \
+		-Dsystemd_notify=false \
+		-Ddtrace=false \
+		-Dsecure-rpc=false \
+		-Dsha1=libcrypto
+	meson compile -C output
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install --no-rebuild -C output
+}
