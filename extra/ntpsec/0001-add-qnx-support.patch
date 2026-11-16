@@ -1,0 +1,254 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Cris Sinnott <csinnott@qnx.com>
+Date: Sun, 15 Nov 2026 18:33:59 +0000
+Subject: [PATCH] Add QNX support
+
+---
+ include/ntp_machine.h   |  7 ++++
+ include/qnx/sys/timex.h | 78 +++++++++++++++++++++++++++++++++++++++++
+ libntp/adjtime_qnx.c    | 73 ++++++++++++++++++++++++++++++++++++++
+ libntp/wscript          |  3 ++
+ wscript                 | 14 ++++++--
+ 5 files changed, 172 insertions(+), 3 deletions(-)
+ create mode 100644 include/qnx/sys/timex.h
+ create mode 100644 libntp/adjtime_qnx.c
+
+diff --git a/include/ntp_machine.h b/include/ntp_machine.h
+index 139e638..4446951 100644
+--- a/include/ntp_machine.h
++++ b/include/ntp_machine.h
+@@ -22,6 +22,13 @@ typedef int clockid_t;
+ int clock_gettime(clockid_t clock_id, struct timespec *tp);
+ #endif
+ 
++#ifdef __QNX__
++/* QNX <time.h> has its own, signed, time64_t; ntp_types.h defines an unsigned one. */
++#define time64_t ntp_time64_t
++/* QNX has no adjtime(); libntp/adjtime_qnx.c implements it with ClockAdjust(). */
++int adjtime(const struct timeval *, struct timeval *);
++#endif
++
+ int ntp_set_tod (struct timespec *tvs);
+ 
+ #endif	/* GUARD_NTP_MACHINE_H */
+diff --git a/include/qnx/sys/timex.h b/include/qnx/sys/timex.h
+new file mode 100644
+index 0000000..c485c49
+--- /dev/null
++++ b/include/qnx/sys/timex.h
+@@ -0,0 +1,78 @@
++/*
++ * sys/timex.h for QNX, which has no kernel clock discipline.
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * QNX provides neither ntp_adjtime() nor struct timex.  This header
++ * supplies the RFC 1589 / NTP kernel API types and constants so the
++ * code compiles unchanged, and an ntp_adjtime() that always fails with
++ * ENOSYS, so ntpd runs its own (daemon) clock discipline loop through
++ * adjtime() (libntp/adjtime_qnx.c) instead of the kernel PLL.
++ */
++#ifndef GUARD_QNX_SYS_TIMEX_H
++#define GUARD_QNX_SYS_TIMEX_H
++
++#include <errno.h>
++#include <sys/time.h>
++
++#define MOD_OFFSET	0x0001
++#define MOD_FREQUENCY	0x0002
++#define MOD_MAXERROR	0x0004
++#define MOD_ESTERROR	0x0008
++#define MOD_STATUS	0x0010
++#define MOD_TIMECONST	0x0020
++#define MOD_TAI		0x0080
++#define MOD_NANO	0x2000
++
++#define STA_PLL		0x0001
++#define STA_PPSFREQ	0x0002
++#define STA_PPSTIME	0x0004
++#define STA_FLL		0x0008
++#define STA_INS		0x0010
++#define STA_DEL		0x0020
++#define STA_UNSYNC	0x0040
++#define STA_FREQHOLD	0x0080
++#define STA_PPSSIGNAL	0x0100
++#define STA_PPSJITTER	0x0200
++#define STA_PPSWANDER	0x0400
++#define STA_PPSERROR	0x0800
++#define STA_CLOCKERR	0x1000
++#define STA_NANO	0x2000
++#define STA_MODE	0x4000
++#define STA_CLK		0x8000
++
++#define TIME_OK		0
++#define TIME_INS	1
++#define TIME_DEL	2
++#define TIME_OOP	3
++#define TIME_WAIT	4
++#define TIME_ERROR	5
++
++struct timex {
++	unsigned int modes;
++	long	offset;
++	long	freq;
++	long	maxerror;
++	long	esterror;
++	int	status;
++	long	constant;
++	long	precision;
++	long	tolerance;
++	long	ppsfreq;
++	long	jitter;
++	int	shift;
++	long	stabil;
++	long	jitcnt;
++	long	calcnt;
++	long	errcnt;
++	long	stbcnt;
++};
++
++static inline int ntp_adjtime(struct timex *tx)
++{
++	(void)tx;
++	errno = ENOSYS;
++	return -1;
++}
++
++#endif /* GUARD_QNX_SYS_TIMEX_H */
+diff --git a/libntp/adjtime_qnx.c b/libntp/adjtime_qnx.c
+new file mode 100644
+index 0000000..ae9fe75
+--- /dev/null
++++ b/libntp/adjtime_qnx.c
+@@ -0,0 +1,73 @@
++/*
++ * adjtime() for QNX, built on ClockAdjust().
++ *
++ * SPDX-License-Identifier: BSD-2-Clause
++ *
++ * QNX has no adjtime().  ClockAdjust() slews CLOCK_REALTIME by adding
++ * tick_nsec_inc nanoseconds to each of the next tick_count clock ticks.
++ * The correction is spread over about one second, which is how often
++ * ntpd calls adjtime(), at no more than 2% of the tick (QNX is a
++ * real-time system, so the clock rate is not changed drastically).
++ * A new call replaces any slew still in progress and returns what was
++ * left of it in olddelta, as adjtime() does elsewhere.
++ */
++#include "config.h"
++
++#include <errno.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <sys/neutrino.h>
++#include <sys/time.h>
++#include <time.h>
++
++#include "ntp_machine.h"
++
++#define SLEW_LIMIT_DIVISOR 50	/* at most tick/50 extra per tick (2%) */
++
++int
++adjtime(const struct timeval *delta, struct timeval *olddelta)
++{
++	struct _clockadjust adj = { 0, 0 };
++	struct _clockadjust old;
++	int64_t ns = 0;
++
++	if (delta != NULL)
++		ns = (int64_t)delta->tv_sec * 1000000000 +
++		    (int64_t)delta->tv_usec * 1000;
++
++	if (ns != 0) {
++		struct _clockperiod period;
++		int64_t mag = llabs(ns);
++		int64_t ticks_per_s, inc, limit;
++
++		if (ClockPeriod(CLOCK_REALTIME, NULL, &period, 0) == -1)
++			return -1;
++		if (period.nsec == 0) {
++			errno = EINVAL;
++			return -1;
++		}
++		ticks_per_s = 1000000000 / period.nsec;
++		if (ticks_per_s < 1)
++			ticks_per_s = 1;
++		inc = (mag + ticks_per_s - 1) / ticks_per_s;
++		limit = period.nsec / SLEW_LIMIT_DIVISOR;
++		if (limit < 1)
++			limit = 1;
++		if (inc > limit)
++			inc = limit;
++		adj.tick_nsec_inc = (_Int32t)(ns < 0 ? -inc : inc);
++		adj.tick_count = (_Uint32t)((mag + inc / 2) / inc);
++	}
++
++	if (ClockAdjust(CLOCK_REALTIME, &adj, &old) == -1)
++		return -1;
++
++	if (olddelta != NULL) {
++		int64_t left = old.tick_count == 0 ? 0 :
++		    (int64_t)old.tick_count * old.tick_nsec_inc;
++
++		olddelta->tv_sec = (time_t)(left / 1000000000);
++		olddelta->tv_usec = (suseconds_t)((left % 1000000000) / 1000);
++	}
++	return 0;
++}
+diff --git a/libntp/wscript b/libntp/wscript
+index 741b380..bd0038e 100644
+--- a/libntp/wscript
++++ b/libntp/wscript
+@@ -45,6 +45,9 @@ def build(ctx):
+         "timespecops.c",
+     ]
+ 
++    if ctx.env.DEST_OS == "qnx":
++        libntp_source_sharable += ["adjtime_qnx.c"]
++
+     if not ctx.env.HAVE_STRLCAT or not ctx.env.HAVE_STRLCPY:
+         libntp_source_sharable += ["strl_obsd.c"]
+ 
+diff --git a/wscript b/wscript
+index 65592c9..47016e5 100644
+--- a/wscript
++++ b/wscript
+@@ -507,6 +507,9 @@ int main(int argc, char **argv) {
+         # OS X needs this for IPv6
+         ctx.define("__APPLE_USE_RFC_3542", 1,
+                    comment="Needed for IPv6 support")
++    elif ctx.env.DEST_OS == "qnx":
++        # QNX has no kernel clock discipline: see include/qnx/sys/timex.h
++        ctx.env.INCLUDES = [ctx.path.find_dir("include/qnx").abspath()]
+     elif ctx.env.DEST_OS == "sunos":
+         # Declare compatibility with the POSIX.1-2001 standard, and any
+         # headers/interfaces not in conflict with that standard
+@@ -726,7 +729,8 @@ int main(int argc, char **argv) {
+                  uselib_store="SCF")
+ 
+     # Some systems don't have sys/timex.h eg OS X, OpenBSD...
+-    if ctx.get_define("HAVE_SYS_TIMEX_H"):
++    # On QNX it is the stand-in from include/qnx, with no kernel PLL behind it.
++    if ctx.get_define("HAVE_SYS_TIMEX_H") and ctx.env.DEST_OS != "qnx":
+         ctx.env.HEADER_SYS_TIMEX_H = True
+ 
+     if ctx.options.refclocks:
+@@ -822,10 +826,14 @@ int main(int argc, char **argv) {
+         ctx.check_cc(header_name="dns_sd.h", lib="dns_sd", mandatory=False,
+                      uselib_store="DNS_SD")
+ 
+-    # Solaris needs -lsocket and -lnsl for socket code
+-    if ctx.env.DEST_OS == "sunos":
++    # Solaris needs -lsocket and -lnsl for socket code, QNX needs -lsocket
++    if ctx.env.DEST_OS in ["sunos", "qnx"]:
+         ctx.check(features="c cshlib", lib="socket", mandatory=False)
+         ctx.check(features="c cshlib", lib="nsl", mandatory=False)
++    # QNX has SysV shared memory (the SHM refclock) in its own library
++    if ctx.env.DEST_OS == "qnx":
++        ctx.check(features="c cshlib", lib="sysv-ipc", uselib_store="SOCKET",
++                  mandatory=False)
+ 
+     if ctx.options.enable_classic_mode:
+         ctx.define("ENABLE_CLASSIC_MODE", 1)
+-- 
+2.51.0
+
