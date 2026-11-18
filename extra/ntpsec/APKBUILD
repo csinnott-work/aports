@@ -4,6 +4,7 @@
 pkgname=ntpsec
 pkgver=1.2.5
 pkgrel=0
+_gitrel=0
 pkgdesc="NTP reference implementation, refactored for security"
 url="https://www.ntpsec.org/"
 arch="all"
@@ -21,6 +22,9 @@ depends="
 	"
 # asciidoctor (man pages), libbsd, libcap and pps-tools are not packaged for QNX;
 # ntpsec builds without them (no man pages, no PPS refclocks, droproot needs root).
+# The tests run from the build tree; beyond makedepends they need only python3
+# (pylib unittest suites and waf-junit.py), already pulled in by python3-dev.
+checkdepends="python3"
 makedepends="
 	avahi-dev
 	bison
@@ -35,15 +39,15 @@ makedepends="
 # ntpdig, ...) dlopen at runtime; ctypes.util.find_library() on QNX finds it only
 # through that unversioned name, so it has to stay in the main package.
 subpackages="$pkgname-openrc"
+# QNX changes live in https://github.com/qnx-ports/ntpsec (branch qnx-$pkgver)
 source="
-	https://ftp.ntpsec.org/pub/releases/ntpsec-$pkgver.tar.gz
-	0001-add-qnx-support.patch
-	0002-use-daemon-loop-without-ntp-adjtime.patch
-	0003-nts-cookie-accept-eof-after-last-key.patch
+	$pkgname-qnx-$pkgver-r$_gitrel.tar.gz::https://github.com/qnx-ports/ntpsec/archive/refs/tags/qnx-$pkgver-r$_gitrel.tar.gz
 	ntp.conf
 	ntpsec.confd
 	ntpsec.initd
+	waf-junit.py
 	"
+builddir="$srcdir/$pkgname-qnx-$pkgver-r$_gitrel"
 
 # secfixes:
 #   1.2.5-r0:
@@ -80,7 +84,14 @@ build() {
 }
 
 check() {
-	./waf check --verbose
+	# JUnit for CI: waf writes build/main/test.log (one block per test program);
+	# waf-junit.py turns it and the binary checks in waf's output into JUnit XML.
+	local rc=0
+	./waf check --verbose > waf-check.out 2>&1 || rc=$?
+	cat waf-check.out
+	python3 "$srcdir"/waf-junit.py build/main/test.log waf-check.out \
+		"$builddir"/test-results.xml
+	return $rc
 }
 
 package() {
@@ -95,11 +106,9 @@ package() {
 	install -dm750 "$pkgdir"/var/log/ntpstats
 }
 sha512sums="
-52f1c993616c5fbadea6732b65949dd2ec5a03d441d48ec2ae415e3bdb1baba06c8d21b2bd3b20c377ef82d06f3e6d5fe7bac961c41e7dadc3d7cbd4c6bf94ab  ntpsec-1.2.5.tar.gz
-420412599c3b3df41687dad945a3b0a3bf06be73bbe81f98f94b766c145ffae3083e97208124a03570278f06ef4eebe7f81f51a16249eb104558591b33f38283  0001-add-qnx-support.patch
-36a90bd8adce672fb94c201ee71385c7ed12e62d9cc6f229916f245f9a711e10a1276a07635f010a3d11c9aef93e9780fcb23d1520fbebe267d08ee00376fe21  0002-use-daemon-loop-without-ntp-adjtime.patch
-b9a3487d7263d0093dabf65d7efa69bc1076dab992c4f8d924acae87da6cfdee0421d80b2ae452bd0bd90317e78f4aa89cbbb1878b20fdb7b1f6a67c7321ac54  0003-nts-cookie-accept-eof-after-last-key.patch
+bc08090b214152b661b4a184339ad2107694179da2f7a635239e5dbdeb0a59a42d9741c1a8c15c3782ccab44d2b46ca450d18a905a7fc98a3ae2981f6188358d  ntpsec-qnx-1.2.5-r0.tar.gz
 e8a72067151dac8cad29db40851343ee51c08dc9f35f71e137910bcf4b8269bafd72dfcb45b93e04d887dc426322fdc3bc250888f988879e006925855c644bd0  ntp.conf
 b1d82e790b94375d9d3df9364a847b4ae40ecf988e19a4fd6081415405e7345e17c1755a9b0e17671a92c4199e12853d1d9fb2694855e39f9159ca006bcac47d  ntpsec.confd
 f38fd2d1677cfba9ba5396f0ee7d4b7a0c287f01e27ea2fa202c89c6aeb4e56a2fc648205d5412a8d44dd7fecaf677ebac86a2a5af4024da4048f88f59d8cc6d  ntpsec.initd
+f0c34b6d1ea913bf598d5138876f793a81d19b6f44184ba19282951e67907d5fd3190cf66ed97893a786414ee40417a696c6e8b66e7bfe18dc696c39afc22c8b  waf-junit.py
 "
